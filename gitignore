@@ -1,0 +1,8 @@
+# Keep data files OUT of git — use secrets or private storage instead
+*.xlsx
+*.csv
+*.xls
+data/
+__pycache__/
+.env
+secrets.toml
