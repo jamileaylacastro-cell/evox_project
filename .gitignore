@@ -1,0 +1,9 @@
+.DS_Store
+*.xlsx
+*.xls
+*.csv
+*.parquet
+*.jsonl
+__pycache__/
+*.py[cod]
+*.log
