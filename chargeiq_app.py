@@ -473,6 +473,100 @@ with col_ttl:
                 unsafe_allow_html=True)
 st.markdown("---")
 
+# ── STATION PROFILE — Host Partner Site view only ───────────────────────────
+if not is_company:
+    import re as _re
+    _station = sel_stations[0]
+
+    _sp_row = sp[sp["STATIONNAME"] == _station]
+
+    # Region/City — Station Profile has no dedicated field, so it's derived
+    # from ADDRESS (last two comma-separated segments, zip code stripped).
+    def _region_city(addr):
+        if not isinstance(addr, str) or not addr.strip():
+            return "—"
+        parts = [p.strip() for p in addr.split(",")]
+        if len(parts) >= 2:
+            tail = parts[-1]
+            tail = _re.sub(r"\d{4,}$", "", tail).strip()
+            return f"{parts[-2]}, {tail}" if tail else parts[-2]
+        return addr
+
+    region_city = _region_city(_sp_row["ADDRESS"].iloc[0]) if len(_sp_row) and "ADDRESS" in _sp_row.columns else "—"
+
+    # Status — from Station Profile's STATION_ACTIVE flag
+    is_active = bool(_sp_row["STATION_ACTIVE"].iloc[0]) if len(_sp_row) and "STATION_ACTIVE" in _sp_row.columns else True
+
+    # First / Last year of operation — derived from actual session history,
+    # since Station Profile has no explicit launch/decommission date field
+    _station_sessions = tx[tx["STATIONNAME"] == _station]
+    if len(_station_sessions):
+        first_year = int(_station_sessions["STARTTIME"].dt.year.min())
+        last_year  = int(_station_sessions["STARTTIME"].dt.year.max())
+    else:
+        first_year, last_year = None, None
+    last_op_display = "-" if is_active else (str(last_year) if last_year else "-")
+
+    # Operating hours
+    if len(_sp_row) and "BUSINESS_START" in _sp_row.columns and "BUSINESS_END" in _sp_row.columns:
+        b_start = str(_sp_row["BUSINESS_START"].iloc[0])[:5]
+        b_end   = str(_sp_row["BUSINESS_END"].iloc[0])[:5]
+        op_hrs_display = "24 Hours" if (b_start == "00:00" and b_end in ("23:59","24:00")) else f"{b_start} – {b_end}"
+    else:
+        op_hrs_display = "—"
+
+    # Charge points + capacity — from the corrected connector-level cp_cap
+    _station_cps = cp_cap[cp_cap["STATIONNAME"] == _station]
+    n_charge_points = len(_station_cps)
+    total_capacity  = _station_cps["CAPACITY_KW"].sum()
+
+    status_color = "#4F7A1E" if is_active else "#C1443E"
+    status_label = "🟢 Active" if is_active else "🔴 Inactive"
+
+    st.markdown(f"""
+    <div style='background:#fff;border-radius:8px;padding:16px 20px;
+                border-left:4px solid #000000;box-shadow:0 1px 6px rgba(0,0,0,.07);
+                margin-bottom:16px'>
+      <div style='font-size:14px;font-weight:700;color:#000;margin-bottom:12px'>
+        🏪 Station Profile — {_station}
+      </div>
+      <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:14px 24px'>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Station Name</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{_station}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Region / City</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{region_city}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Status</div>
+          <div style='font-size:13px;color:{status_color};font-weight:600'>{status_label}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Operating Hours</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{op_hrs_display}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Year of First Operation</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{first_year if first_year else '—'}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Year of Last Operation</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{last_op_display}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Number of Charge Points</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{n_charge_points}</div>
+        </div>
+        <div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Charger Capacity</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{total_capacity:,.1f} kW</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # ── FORMULA EXPANDER ────────────────────────────────────────────────────────
 with st.expander("📐 Energy-Based Utilization Formula", expanded=False):
     st.markdown(f"""<div class='formula-box'>
