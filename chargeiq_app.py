@@ -128,7 +128,9 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] input::selection{
 section[data-testid="stSidebar"] div[data-testid="stSelectbox"] *{ color:#000000!important; }
 section[data-testid="stSidebar"] div[data-testid="stMultiSelect"] *{ color:#000000!important; }
 section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label,
-section[data-testid="stSidebar"] div[data-testid="stMultiSelect"] label{ color:#FFF4EC!important; }
+section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label *,
+section[data-testid="stSidebar"] div[data-testid="stMultiSelect"] label,
+section[data-testid="stSidebar"] div[data-testid="stMultiSelect"] label *{ color:#FFF4EC!important; }
 div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
 div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div{
   background:#FFFFFF!important;
@@ -253,6 +255,17 @@ def load_all(tx_b, cp_b, sp_b, ud_b, wt_b, fin_b):
     tx["HOUR"]  = tx["STARTTIME"].dt.hour
     tx["DURATION_MIN"] = (tx["ENDTIME"] - tx["STARTTIME"]).dt.total_seconds() / 60
 
+    # Guard against corrupted ENDTIME values — some sessions have ENDTIME
+    # defaulted to a placeholder date (e.g. 1900-01-02), almost certainly
+    # sessions that never closed out properly in the source system. That
+    # produces wildly negative durations (or, rarely, implausibly long
+    # ones) that would badly skew a plain average. The session itself
+    # (energy, revenue, station) stays in the data — only its duration is
+    # excluded from duration-based metrics.
+    _dur_bad = (tx["DURATION_MIN"] < 0) | (tx["DURATION_MIN"] > 1440)
+    dur_excluded_count = int(_dur_bad.sum())
+    tx.loc[_dur_bad, "DURATION_MIN"] = np.nan
+
     sp_coords = sp.groupby("STATIONNAME")[["LATITUDE","LONGITUDE","BUSINESS_START","BUSINESS_END","RATE_PER_KWH"]].first().reset_index()
     cp = cp.merge(sp_coords[["STATIONNAME","BUSINESS_START","BUSINESS_END"]], on="STATIONNAME", how="left")
 
@@ -299,9 +312,28 @@ def load_all(tx_b, cp_b, sp_b, ud_b, wt_b, fin_b):
     fees = fin["FEES AND ASSUMPTIONS"].dropna(subset=["CPO"]).copy()
     fees = fees[fees["CPO"] != "CPO - JV"].copy()
 
-    return tx, cp, cp_cap, sp, ud, wt, fin_overall, opex, fees, cp_excluded_count
+    # CAPEX sheet — needed for payback calculations, not previously loaded
+    capex = fin["CAPEX"][["SITES","TOTAL CAPEX"]].dropna(subset=["SITES"]).copy()
+    capex.columns = ["STATIONNAME","TOTAL_CAPEX"]
+    capex = capex[~capex["STATIONNAME"].isin(["CPO"])].copy()
 
-tx, cp, cp_cap, sp, ud, wt, fin_overall, opex_df, fees_df, cp_excluded_count = load_all(
+    # Payback can only be computed for stations whose Financials-workbook
+    # name actually matches a real STATIONNAME in the session data — most
+    # CPO entries in the workbook do NOT correspond to a station with any
+    # transaction history at all (separate business entities, or simply
+    # not represented in Session Logs).
+    tx_station_set = set(tx["STATIONNAME"].dropna().unique())
+    fin_costs = fin_overall[["CPO","ActualElecCost","ActualRent"]].rename(
+        columns={"CPO":"STATIONNAME"})
+    payback_ref = capex.merge(fin_costs, on="STATIONNAME", how="inner")
+    payback_ref = payback_ref[payback_ref["STATIONNAME"].isin(tx_station_set)].copy()
+    payback_ref = payback_ref[payback_ref["TOTAL_CAPEX"] > 0].copy()  # exclude stations with no recorded investment
+
+    return (tx, cp, cp_cap, sp, ud, wt, fin_overall, opex, fees, capex, payback_ref,
+            cp_excluded_count, dur_excluded_count)
+
+(tx, cp, cp_cap, sp, ud, wt, fin_overall, opex_df, fees_df, capex_df, payback_ref,
+ cp_excluded_count, dur_excluded_count) = load_all(
     file_bytes["transactions"], file_bytes["charge_points"], file_bytes["station_profile"],
     file_bytes["user_details"], file_bytes["wallet_txn"], file_bytes["financials"]
 
@@ -426,6 +458,7 @@ offline_cps = len(cp_sel[cp_sel["NETWORK_STATUS"] == "Offline"])
 faulty_cps  = len(cp_sel[cp_sel["CONNECTOR_STATUS"] == "Faulty"])
 uptime_pct  = (online_cps / total_cps * 100) if total_cps > 0 else 0
 avg_dur     = df["DURATION_MIN"].mean() if len(df) else 0
+avg_dur     = 0 if pd.isna(avg_dur) else avg_dur
 
 # Peak hour
 if len(df):
@@ -587,6 +620,13 @@ Gap vs {target_util}% target   = {util_gap:+.1f} pp
         f"of which {online_cps:,} are Online and count toward available capacity "
         f"({offline_cps:,} Offline, {faulty_cps:,} Faulty)."
     )
+    if dur_excluded_count > 0:
+        st.caption(
+            f"📋 **Session duration data quality:** {dur_excluded_count:,} sessions network-wide "
+            f"have a corrupted ENDTIME (defaulted to a placeholder date, producing a negative or "
+            f"implausible duration) and are excluded from Avg Session Duration only — their "
+            f"revenue, energy, and session counts still count everywhere else."
+        )
 
 # ── KPI HELPER ────────────────────────────────────────────────────────────────
 def kpi(col, label, value, trend, tclass="up", border="#000000"):
@@ -827,6 +867,20 @@ if len(map_df):
     }).sort_values("Util %", ascending=False)
     st.dataframe(tbl, use_container_width=True, hide_index=True)
 
+    _t70 = round(target_util*0.7, 1)
+    _t40 = round(target_util*0.4, 1)
+    st.markdown(f"""
+    <div style='background:#fff;border-radius:6px;padding:10px 14px;
+                border:1px solid #EAE0D0;margin-top:6px;font-size:10px;color:#5C574D'>
+      <b style='color:#000'>Action legend</b> — thresholds scale with your current
+      {target_util}% target:
+      &nbsp; <span style='color:#4F7A1E;font-weight:600'>✅ Expand</span> ≥ {target_util}%
+      &nbsp;·&nbsp; <span style='color:#A8710A;font-weight:600'>🟡 Monitor</span> ≥ {_t70}%
+      &nbsp;·&nbsp; <span style='color:#A8710A;font-weight:600'>⚠️ Optimize</span> ≥ {_t40}%
+      &nbsp;·&nbsp; <span style='color:#C1443E;font-weight:600'>🔴 Review</span> &lt; {_t40}%
+    </div>
+    """, unsafe_allow_html=True)
+
 # ── FINANCIALS (CPO breakdown table — network-wide, Company view only) ──────
 if is_company:
     st.markdown("<div class='sec-hdr'>💰 Financials — Revenue & Operating Costs by CPO (Jan–Jun 2026)</div>",
@@ -836,6 +890,15 @@ if is_company:
     for col in fd.columns[1:]:
         fd[col] = fd[col].apply(lambda x: f"₱{x:,.0f}" if pd.notna(x) and isinstance(x,(int,float)) else "—")
     st.dataframe(fd.dropna(subset=["CPO / Station"]), use_container_width=True, hide_index=True)
+    _n_matched = payback_ref["STATIONNAME"].nunique()
+    st.caption(
+        f"📋 **Source:** figures above are reported directly from the Financials workbook "
+        f"(`{FILE_DEFAULTS['financials']}`), not computed from Session Logs — they are not "
+        f"currently reconciled against the transaction-based Revenue KPIs shown elsewhere in "
+        f"this dashboard. Only {_n_matched} of the {len(fin_overall):,} entries here have a name "
+        f"matching an actual station in your session data ({', '.join(sorted(payback_ref['STATIONNAME'].unique())) if _n_matched else 'none'}); "
+        f"the rest have no corresponding transaction history to cross-check against."
+    )
 
 # ── USER SEGMENTS (charts — Company view only) ───────────────────────────────
 if is_company:
@@ -853,6 +916,79 @@ if is_company:
             plugs = ud["PLUG_TYPE"].value_counts().reset_index()
             plugs.columns = ["Plug Type","Users"]
             st.bar_chart(plugs.set_index("Plug Type"), color="#BEFF6C", height=200)
+
+# ── SITE PAYBACK TRACKER — Host Partner Site view only ──────────────────────
+if not is_company:
+    _station = sel_stations[0]
+    st.markdown("<div class='sec-hdr'>💰 Site Payback Tracker</div>", unsafe_allow_html=True)
+
+    _match = payback_ref[payback_ref["STATIONNAME"] == _station]
+
+    if len(_match) == 0:
+        st.info(
+            f"⚠️ Payback can't be computed for **{_station}** — its name doesn't have a "
+            f"matching entry with recorded CapEx in the Financials workbook (`{FILE_DEFAULTS['financials']}`), "
+            f"or no investment amount is on file for it. Payback tracking currently only works for "
+            f"the {len(payback_ref)} stations whose Financials-workbook name matches an actual "
+            f"station in your session data: {', '.join(sorted(payback_ref['STATIONNAME'].unique()))}."
+        )
+    else:
+        _capex   = float(_match["TOTAL_CAPEX"].iloc[0])
+        _elec    = float(_match["ActualElecCost"].iloc[0])
+        _rent    = float(_match["ActualRent"].iloc[0])
+
+        # Revenue from the SAME Jan–Jun 2026 window the Financials workbook's
+        # actual cost figures cover — using all-time transaction revenue
+        # against only 6 months of cost data would overstate progress.
+        _jj = tx[
+            (tx["STATIONNAME"] == _station) &
+            (tx["STARTTIME"] >= pd.Timestamp("2026-01-01")) &
+            (tx["STARTTIME"] <  pd.Timestamp("2026-07-01")) &
+            (~tx["ISERROR"].astype(bool))
+        ]
+        _jj_revenue = _jj["TOTALAMOUNT"].sum()
+        _months_covered = _jj["MONTH"].nunique() if len(_jj) else 0
+
+        _contribution = _jj_revenue - _elec - _rent
+        _payback_pct  = (_contribution / _capex * 100) if _capex > 0 else 0
+        _monthly_contrib = (_contribution / _months_covered) if _months_covered > 0 else 0
+        _months_left = ((_capex - _contribution) / _monthly_contrib) if _monthly_contrib > 0 else None
+
+        pc1, pc2 = st.columns([2,1])
+        with pc1:
+            st.markdown(f"""
+            <div style='background:#fff;border-radius:8px;padding:16px 20px;
+                        border-left:4px solid #000;box-shadow:0 1px 6px rgba(0,0,0,.07)'>
+              <div style='font-size:11px;color:#5C574D'>Jan–Jun 2026 Revenue (from transactions)</div>
+              <div style='font-size:15px;font-weight:700;color:#000'>₱{_jj_revenue:,.0f}</div>
+              <div style='display:flex;gap:24px;margin-top:8px'>
+                <div><div style='font-size:10px;color:#5C574D'>− Electricity Cost</div>
+                     <div style='font-size:13px;color:#C1443E;font-weight:600'>₱{_elec:,.0f}</div></div>
+                <div><div style='font-size:10px;color:#5C574D'>− Rent / Share</div>
+                     <div style='font-size:13px;color:#C1443E;font-weight:600'>₱{_rent:,.0f}</div></div>
+                <div><div style='font-size:10px;color:#5C574D'>= Contribution</div>
+                     <div style='font-size:13px;color:#4F7A1E;font-weight:700'>₱{_contribution:,.0f}</div></div>
+              </div>
+              <hr style='margin:10px 0;border-color:#EAE0D0'>
+              <div style='font-size:10px;color:#5C574D'>Total CapEx (Financials workbook)</div>
+              <div style='font-size:13px;color:#000;font-weight:600'>₱{_capex:,.0f}</div>
+              <div style='background:#EAE0D0;border-radius:4px;height:14px;margin-top:8px;overflow:hidden'>
+                <div style='width:{min(max(_payback_pct,0),100)}%;height:100%;
+                            background:{"#BEFF6C" if _payback_pct>=0 else "#C1443E"};border-radius:4px'></div>
+              </div>
+              <div style='font-size:10px;color:#5C574D;margin-top:4px'>
+                {_payback_pct:.1f}% recovered
+                {f"· ~{_months_left:.0f} months remaining at current rate" if _months_left and _months_left>0 else ""}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with pc2:
+            st.caption(
+                f"📋 Based on {_months_covered} month(s) of matched actual cost data "
+                f"(Jan–Jun 2026). Revenue is computed from your transaction data for the "
+                f"same window, not the Financials workbook's own Revenue figure — so this "
+                f"may differ from the number shown in the network-wide Financials table."
+            )
 
 # ── HOST PARTNER CONNECTOR DETAIL ────────────────────────────────────────────
 if not is_company:
