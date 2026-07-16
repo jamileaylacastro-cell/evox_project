@@ -21,7 +21,7 @@ Place these Excel files in the **same folder** as `evox_app.py`
 | `walletTransactions.xlsx` | Transaction Logs export |
 | `Station_Profile.xlsx` | Station Profile export |
 | `Charge_Point_Information_...xlsx` | Charge Point Info export |
-| `EVOxCharge_Financials_-_AIM_MAIDA.xlsx` | Financials workbook |
+| `Financials_-_AIM_MAIDA.xlsx` | Financials workbook |
 
 ## Security — DO NOT commit data files to GitHub
 
