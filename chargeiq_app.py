@@ -540,18 +540,49 @@ if not is_company:
         first_year, last_year = None, None
     last_op_display = "-" if is_active else (str(last_year) if last_year else "-")
 
-    # Operating hours
+    # Operating hours — BUSINESS_START/END can come through as a plain
+    # time string ("09:00:00") OR a full datetime with a placeholder date
+    # ("1900-01-02 09:00:00"), depending on how the source file was
+    # exported. Parse robustly and keep only the TIME component either way.
+    def _time_only(val):
+        if pd.isna(val) or str(val).strip() == "":
+            return None
+        parsed = pd.to_datetime(str(val), errors="coerce")
+        return parsed.strftime("%H:%M") if pd.notna(parsed) else None
+
     if len(_sp_row) and "BUSINESS_START" in _sp_row.columns and "BUSINESS_END" in _sp_row.columns:
-        b_start = str(_sp_row["BUSINESS_START"].iloc[0])[:5]
-        b_end   = str(_sp_row["BUSINESS_END"].iloc[0])[:5]
-        op_hrs_display = "24 Hours" if (b_start == "00:00" and b_end in ("23:59","24:00")) else f"{b_start} – {b_end}"
+        b_start = _time_only(_sp_row["BUSINESS_START"].iloc[0])
+        b_end   = _time_only(_sp_row["BUSINESS_END"].iloc[0])
+        if b_start and b_end:
+            op_hrs_display = "24 Hours" if (b_start == "00:00" and b_end in ("23:59","00:00")) else f"{b_start} – {b_end}"
+        else:
+            op_hrs_display = "—"
     else:
         op_hrs_display = "—"
 
-    # Charge points + capacity — from the corrected connector-level cp_cap
+    # Charge points + capacity — from the corrected connector-level cp_cap.
+    # Capacity shown is the AVERAGE across this station's charge points,
+    # not the total network capacity (that's used separately for the
+    # utilization denominator).
     _station_cps = cp_cap[cp_cap["STATIONNAME"] == _station]
     n_charge_points = len(_station_cps)
-    total_capacity  = _station_cps["CAPACITY_KW"].sum()
+    avg_capacity    = _station_cps["CAPACITY_KW"].mean() if len(_station_cps) else 0
+
+    # Rate per kWh by plug type — RATE_PER_KWH can genuinely differ by
+    # plug type at the same station (confirmed in the data), so show it
+    # broken out rather than a single station-wide figure.
+    if len(_station_cps) and "RATE_PER_KWH" in _station_cps.columns:
+        _rate_by_plug = (_station_cps.groupby("PLUG_TYPE")["RATE_PER_KWH"]
+                         .mean().round(2).sort_index())
+        rate_rows = "".join(
+            f"<div style='display:flex;justify-content:space-between;font-size:11px;"
+            f"padding:3px 0;border-bottom:1px solid #EAE0D0'>"
+            f"<span style='color:#5C574D'>{plug}</span>"
+            f"<span style='color:#000;font-weight:600'>₱{rate:,.2f} / kWh</span></div>"
+            for plug, rate in _rate_by_plug.items()
+        )
+    else:
+        rate_rows = "<div style='font-size:11px;color:#5C574D'>No rate data available</div>"
 
     status_color = "#4F7A1E" if is_active else "#C1443E"
     status_label = "🟢 Active" if is_active else "🔴 Inactive"
@@ -593,9 +624,16 @@ if not is_company:
           <div style='font-size:13px;color:#000;font-weight:600'>{n_charge_points}</div>
         </div>
         <div>
-          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Charger Capacity</div>
-          <div style='font-size:13px;color:#000;font-weight:600'>{total_capacity:,.1f} kW</div>
+          <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em'>Avg Charger Capacity</div>
+          <div style='font-size:13px;color:#000;font-weight:600'>{avg_capacity:,.1f} kW</div>
         </div>
+      </div>
+      <hr style='margin:14px 0 10px;border-color:#EAE0D0'>
+      <div style='font-size:9px;color:#5C574D;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px'>
+        Rate per kWh by Plug Type
+      </div>
+      <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:0 24px'>
+        {rate_rows}
       </div>
     </div>
     """, unsafe_allow_html=True)
