@@ -1,6 +1,6 @@
 # EVOxCharge Analytics Dashboard
 
-Built with Streamlit + PyDeck · AIM MAIDA Capstone
+Built with Streamlit + PyDeck
 
 ## Setup
 
